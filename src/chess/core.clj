@@ -1,10 +1,26 @@
 (ns chess.core
+
 (require [clojure.set :as set])
 (require [clojure.string :as str])
+;(require 'chess.basics)
+;(refer 'chess.basics)
   (:gen-class))
 
 
-(declare successful-move prompt-move game-over query-rows)
+(declare successful-move prompt-move game-over)
+;for debugging
+(def ^:dynamic *verbose* false)
+
+(defmacro printfv
+  [fmt & args]
+  `(when *verbose*
+     (printf ~fmt ~@args)))
+
+(defmacro with-verbose
+  [& body]
+  `(binding [*verbose* true] ~@body))
+;end debugging code
+
 
 (defn isoff-board 
 "Checks if a square is offboard"
@@ -12,11 +28,6 @@
 (< 0 (bit-and (+ n (* 8 (quot n 8))) 0x88))
 )
 
-(defn add-piece
-"Adds a piece to a board"
-[board piece]
-board
-)
 
 (def piece-string "PNBRQKpnbrqk")
 
@@ -67,6 +78,25 @@ brd
 )
 
 (def start-fen  "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
+
+
+(defn black-total-pv ;total piece values for black
+[board]
+  (let [piece-values {\p 1, \n 3, \b 3, \r 5, \q 9}]
+    (apply + (filter identity (map piece-values (map :piece (drop-last board))))))
+)
+
+(defn white-total-pv ;total piece values for white
+[board]
+  (let [piece-values {\P 1, \N 3, \B 3, \R 5, \Q 9}]
+    (apply + (filter identity (map piece-values (map :piece (drop-last board))))))
+)
+
+(defn total-pv ;sum of the values all the pieces (except kings)
+[board]
+  (let [piece-values {\p 1, \n 3, \b 3, \r 5, \q 9 \P 1, \N 3, \B 3, \R 5, \Q 9}]
+    (apply + (filter identity (map piece-values (map :piece (drop-last board))))))
+) 
 
 
 (def alpha-start 97)
@@ -121,7 +151,9 @@ brd
 (defn isempty?
   "Does the position have a piece in it?"
   [board pos]
-  (= (:piece (board pos)) \-))
+(if (< -1 pos)
+  (= (:piece (board (rem pos 64))) \-))
+)
 
 (defn iswhite?
   "Does the position have a piece in it?"
@@ -145,6 +177,9 @@ false
 false)
 )))
 
+
+
+
 (defn remove-piece
   "Take the piece at given position out of the board"
   [board sq]
@@ -155,17 +190,22 @@ false)
 (defn place-piece
   "Put a piece (character) in the board at given position"
   [board square piece]
+(if (or (> square 63) (< square 0))
+(println "warning: off-board move" square piece)
+)
 (if (.contains piece-string (str piece))
   (assoc board square  { :pos square :piece  piece })
 (remove-piece board square);(println "Wrong piece!")
 ))         
 
+
 (defn move-piece
   "Take piece out of p1 and place it in p2"
   [board p1 p2old]
-  (let [p2 (if (> p2old 64) (+ (rem p2old 8) 56) (if(< p2old 0) (+ (p2old 8) 8)  p2old)) ;promotions
+  (let [piece (:piece (board p1)) p2 (if (and (> p2old 99) (= (Character/toUpperCase piece) \P)) (- p2old 100) p2old) ;promotions
  brd (place-piece (remove-piece board p1) p2 ((board p1) :piece)) stm (:side-to-move (brd 64)) board1 (assoc-in brd [64 :side-to-move] (if (= stm "w") "b" "w"))]
-(if (= (Character/toLowerCase (:piece (board p1))) \k) ;castling
+;(if (and (> p1 47) (> p2 55) (= piece \P)) (println "warning: off-board move" p1 p2 piece))
+(if (= (Character/toLowerCase piece) \k) ;castling
 (if (= p1 (- p2 2)) 
  (place-piece (remove-piece board1 (inc p2)) (dec p2) ((board (inc p2)) :piece))
 (if (= p1 (+ p2 2)) 
@@ -173,8 +213,8 @@ false)
 (assoc-in board1 [64 :castles] "-"))
 )
 (cond
- (and (= (quot p2 8) 7) (= \P (:piece (board1 p1)))) (assoc-in board1 [p2 :piece] \Q)
-  (and (= (quot p2 8) 0) (= \p (:piece (board1 p1)))) (assoc-in board1 [p2 :piece] \q)
+ (and (= (quot p2 8) 7) (= \P piece)) (assoc-in board1 [p2 :piece] \Q)
+  (and (= (quot p2 8) 0) (= \p piece)) (assoc-in board1 [p2 :piece] \q)
 :else board1))
 ))
 
@@ -229,10 +269,20 @@ board)))
 (* 8 (- (Character/digit (last (take 4 text)) 10) 1)) )]
 )
 
+
+(defn to-algebra 
+  "takes a pos-to-pos move and turns into algebraic notation (so far w/o promotion)"
+  [move]
+  (let [text (reduce (fn [cum y] (let [x (rem y 100) rank  (quot x 8) ] (str cum (char (+ (rem x 8) alpha-start)) (inc rank)))) "" move) p1 (first move) p2 (second move)]
+    (if (or (> p2 99)) 
+      (str text "q")
+      text
+      ) ))
  
 (defn make-move 
 "function used in set-position"
 [board x]
+ ; (if (empty? x) board)
 (let [y (move-from-algebra x)
 board1 (move-piece board (first y) (second y) )] 
 (if (= 4 (count x))
@@ -241,8 +291,19 @@ board1
 )
 ))
 
+(defn set-board
+"sets position for MCTS"
+[input]
+(if (= (count input) 8) start-board; if starting position
+(let [board start-board input-vector (str/split input #" ")]
+(reduce make-move board (rest input-vector))
+
+))
+)
+
+
 (defn set-position
-"sets position"
+"sets position for uci"
 [input position]
 
 (if (.contains input "startpos")
@@ -285,15 +346,17 @@ cum)
 (defn pawn-moves
 "finds pawn moves from a position and side to move (stm)"
 [pos stm] 
+(if (> pos 55) (println "hey! how come a pawn is 8 rank" pos stm))
   (let [rank (quot pos 8) factor (if (= stm "w") 1 -1)
 result (if ( or (= rank factor) (= rank (+ factor 7)))
   [ (list pos (+ pos (* factor 8))) (list pos (+ pos  (* factor 16)))]
 [(list pos (+ pos  (* factor 8)))]
 )]
+
 (for [x result]
 (cond 
-(> (second x) 55) (list (first x) (+ 100 (second x))) 
-(< (second x) 8) (list (first x) (+ 100 (second x) )) 
+(> (second x) 55)  (list (first x) (+ 100 (second x)))  
+(< (second x) 8)  (list (first x) (+ 100 (second x) )) 
 :else x
 ))
 ))
@@ -388,22 +451,24 @@ result (for [x [left right]
 pos  (first (map :pos (filter #(= (:piece %) (if (= stm "w") \K \k)) board)))
  isopposite?  (if (= stm "w") isblack? iswhite?) 
 issame-color?  (if (= stm "w") iswhite?  isblack?)
- file (rem pos 8) rank (quot pos 8) 
+      file (if pos (rem pos 8) -100) rank (if pos (quot pos 8) -100) 
 ranks (filter #(and (>= % 0) (< % 8)) [(- rank 1) rank (+ rank 1) ])
 files (filter #(and (>= % 0) (< % 8)) [(- file 1) file (+ file 1) ])
 ]
-(into
- (for [x1 (vec files) x2 (vec ranks) 
-:let [p2 (+ x1 (* x2 8))]
-:when (not (or (and (= x1 file) (= x2 rank))
- (issame-color? board p2)))] (list pos p2)) ;regular non-castling moves
-(filter identity [(if (and (isempty? board (inc pos)) (isempty? board (+ 2 pos)) (str/includes? (:castles (board 64)) (if (= stm "w") "K" "k"))) (list pos (+ 2 pos)))
-(if (and (isempty? board (dec pos)) (isempty? board (- pos 2))  (isempty? board (- pos 3)) (str/includes? (:castles (board 64)) (if (= stm "w") "Q" "q")))  (list pos (- pos 2)))]) ;castling moves
-)))
+  (if  (not pos)
+    []
+    (into
+     (for [x1 (vec files) x2 (vec ranks) 
+           :let [p2 (+ x1 (* x2 8))]
+           :when (not (or (and (= x1 file) (= x2 rank))
+                          (issame-color? board p2)))] (list pos p2)) ;regular non-castling moves
+     (filter identity [(if (and (isempty? board (inc pos)) (isempty? board (+ 2 pos)) (str/includes? (:castles (board 64)) (if (= stm "w") "K" "k"))) (list pos (+ 2 pos)))
+                       (if (and (isempty? board (dec pos)) (isempty? board (- pos 2))  (isempty? board (- pos 3)) (str/includes? (:castles (board 64)) (if (= stm "w") "Q" "q")))  (list pos (- pos 2)))]) ;castling moves
+     ))))
 
 
   (defn all-piece-moves
-    "list of all piece moves (without chwcking for cheks)"
+    "list of all piece moves (without checking for checks)"
     [board]
 (reduce into 
 (find-knight-moves board)
@@ -444,42 +509,234 @@ files (filter #(and (>= % 0) (< % 8)) [(- file 1) file (+ file 1) ])
 [board]
 (for [king-moves (find-king-moves board)
                enemy-attacks (all-enemy-captures board)
-:when (= (second king-moves) (second enemy-attacks))]
+:when (= (second king-moves) (rem (second enemy-attacks) 100))]
 (second king-moves)
 ))
 
-(defn is-incheck?
+(defn ischeck?
 [board]
+ (let [ stm (:side-to-move (board 64))
+kingpos  (first (map :pos (filter #(= (:piece %) (if (= stm "w") \K \k)) board)))  enemy-attacks (all-enemy-captures board)]
+   (some #(= kingpos (rem (second %) 100)) enemy-attacks) 
+))
 
+(defn ischeck-move?
+[board]
  (let [ stm (:side-to-move (board 64))
 kingpos  (first (map :pos (filter #(= (:piece %) (if (= stm "w") \k \K)) board)))  enemy-attacks (all-captures board)]
- (some #(= kingpos (second %)) enemy-attacks) 
+   (some #(= kingpos (rem (second %) 100)) enemy-attacks) 
 ))
 
    (defn valid-moves
 [board]
-(for [move  (all-piece-moves board)
-;(filter #(not (is-incheck? % 4))
- :when (not (is-incheck? (move-piece board (first move) (second move))))] 
-move
+(let [stm (:side-to-move (board 64))
+pos  (first (map :pos (filter #(= (:piece %) (if (= stm "w") \K \k)) board)))]
+;  (apply vector)
+  (for [move  (all-piece-moves board)
+        :when  (and (or (< (second move) 64) (> (second move) 99))  (not (ischeck-move? (move-piece board (first move) (second move)))))]
+
+    move
+    )))
+
+  (defn valid-moves2 "faster than valid-moves, but doesn't include checks, so used only for simulations to save time"
+[board]
+(let [stm (:side-to-move (board 64))
+pos  (first (map :pos (filter #(= (:piece %) (if (= stm "w") \K \k)) board)))]
+ 
+ (filter  #(and (or (< (second %) 64) (> (second %) 99)) (> (second %) -1))  (all-piece-moves board))
 ))
 
-  (defn to-algebra 
-    "takes a pos-to-pos move and turns into algebraic notation (so far w/o promotion)"
-    [move]
-    (let [text (reduce (fn [cum y] (let [x (rem y 100) rank  (quot x 8) ] (str cum (char (+ (rem x 8) alpha-start)) (inc rank)))) "" move) p1 (first move) p2 (second move)]
- (if (or (> p2 99)) 
-(str text "q")
- text
-   ) ))
+(defn ismate?
+[board]
+  (and  (ischeck? board) (empty? (valid-moves board)))
+)
+
+
+(defn game-result
+[board]
+(if (ismate? board)
+  (let [stm (:side-to-move (board 64))]
+(if (= stm "w")
+0; white loses
+1; white wins
+)
+)
+  (if (let [tpv (total-pv board)]
+        (or (= tpv 3) (= tpv 0) (empty? (valid-moves2 board))
+)
+)
+1/2 ;draw
+;??? add stalemate
+)))
+
+(defn nodes-below
+[tree position]
+(let [cp (count position)]
+(into {}  (filter #(.contains (first %) position) 
+                 (filter #(and (< (count (first %)) (+ cp 7))  (> (count (first %)) cp) ) tree))
+)))
+
+(defn add-to-tree
+"add a position to a tree, used in expansion"
+[tree position]
+   (conj (into {} position) tree)
+)
+
+(defn ratio
+[values]
+ (/ (first values) (second values))
+)
+
+(defn ucb1+ 
+"upper limit"
+[values total]
+  (+ (/ (first values) (second values)) (Math/sqrt (/ (* 2 (Math/log total)) 
+                                                      (second values))))
+)
+
+(defn ucb1-
+"lower limit"
+[values total]
+  (- (/ (first values) (second values)) (Math/sqrt (/ (* 2 (Math/log total)) 
+                                                      (second values))))
+)
+
+(defn best-move
+[tree position]
+  (let [total (second (tree position)) 
+nodes (nodes-below tree position) 
+plies (count (str/split position #" "))
+        pos (first (if (odd? plies) (apply max-key (comp #(ucb1- % total) val) nodes)
+ (apply min-key (comp #(ucb1+ % total) val) nodes)) 
+) ]
+(last (str/split pos #" "))
+))
+
+
+(defn ordered-moves
+[tree position]
+  (let [total (second (tree position)) 
+nodes (nodes-below tree position) 
+plies (count (str/split position #" "))
+        pos (first (if (odd? plies) (apply sort-by (comp #(ucb1- % total) val) nodes)
+ (apply sort-by (comp #(ucb1+ % total) val) nodes)) 
+) ]
+(last (str/split pos #" "))
+))
+
+(defn select
+[tree topnode]
+(let [total (second(tree topnode))]
+(loop [node topnode] (let [nodes (nodes-below tree node) plies (count (str/split node #" "))]
+(if (or (empty? nodes) (some nil? (first (vals nodes))))
+[tree [node (tree node)]]
+(recur (first (cond (odd? plies) (apply max-key (comp #( ucb1+ % total) val) nodes) 
+:else (apply min-key (comp #(ucb1- % total) val) nodes) 
+)))))
+)))
+
+;(cond (= stm \w) (ucb1 % total))
+
+
+(defn expand
+[tree]
+  (let [node (rand-nth (keys tree)) board  (set-board node)]
+
+  (println node)
+  ;(if (first) (first) (vals tree))
+  (add-to-tree tree
+               (for [move (valid-moves board)] 
+                 {(str node " " (to-algebra  move))  [nil 0]}))
+                                        ;tree ;don't expand if not simulated
+      
+  ))
+
+(defn expandall
+"expand to include all-the possible moves"
+[tree node]
+
+(let [board  (set-board  (first node))]
+(if (first (first (vals tree)))
+ (add-to-tree tree
+(for [move (valid-moves board)] 
+   [(str (first node) " " (to-algebra  move))  [nil 0]]))
+tree ;don't expand if not simulated
+)
+))
+
+(defn simulate-one
+  [board] ; like ["startpos" [nil 0]]
+(if (first (second board))
+board
+
+  (loop [position (set-board (first board)) move-count 1]
+    (let [moves (valid-moves2 position) gresult (game-result position) ] 
+      (if gresult [(first board) [(* gresult 50) 50]]
+          (let [ move (rand-nth moves) nextpos   (move-piece position (first move) (second move)) result (or (game-result nextpos) (if (> move-count 100) 1/2)) ]
+            (if result  
+              [(first  board) [result 1]]  
+
+              (recur nextpos (inc move-count))
+              )))))))
+
+(defn simulate
+  [tree] ; like ["startpos" [nil 0]
+  (let [niltree (filter #(nil? (first (second %))) tree)]
+    (reduce conj tree (map simulate-one niltree)))) 
+  
+
+(defn update-tree
+"Updates, or backpropagates a tree"
+  [tree0 position0]
+  (let [eval (first (tree0 position0)) nsim (second (tree0 position0))]
+    (loop [tree tree0 position position0]
+      (let [values (tree position) up-position (str/join " " (drop-last (str/split position #" "))) up-values (tree up-position)]
+       
+        (printfv position up-position (+ (first values)  (first up-values) )) ;debug
+        (if (not (first up-values))
+          tree  
+          (recur (conj tree [up-position [(+ eval  (first up-values) ) (+ nsim (second up-values))]] ) up-position)
+          )))))
+
+
+(defn update-tree2
+"Updates, or backpropagates a tree"
+[tree node]
+  (let [nodes (keys (nodes-below tree node))]
+
+    (if (empty? nodes) tree
+
+   ;     (reduce #(add-nodes-below %1  %2) tree nodes)
+     (reduce update-tree tree nodes)
+)
+))
+
+
+(defn add-nodes-below "adds the values of the nodes below to the current node"
+[tree node]
+ (let [nodes (conj (keys (nodes-below tree node)) node)]
+    (if (empty? nodes) tree
+(conj tree [node (apply map + (map tree nodes))])
+)))
+
+(defn mcts "Monte Carlo Tree Search"
+[board]
+(loop [tree {board [nil 0]}]
+  (let [positions (keys (filter #(nil? (first (second %))) tree))] ;(first (filter #(not (second %)) tree))
+;(println posval)
+(if (> (count tree) 50)
+  (into {} (filter #(first (second %)) tree))
+(recur (apply expandall
+       (select (reduce update-tree (simulate tree) positions) board)))
+))))  
 
 (defn uci
 []
 (def nameEngine "almas")
 (println "name" nameEngine "\n")
-(loop [input (str/lower-case (read-line)) position start-board]
+(loop [input (str/lower-case (read-line)) position "startpos"]
 (when (not= input "quit")
-
+(let [input-vector (rest (str/split input #" "))] ;remove the word "position"
 (if (= "uci" input)
 (println "id" nameEngine " \n uciok \n"))
 
@@ -487,10 +744,10 @@ move
 (println "readyok \n"))
 
 (if (str/includes? input "go")
-(println   "bestmove" (to-algebra (rand-nth (valid-moves position))))) 
-(recur (str/lower-case (read-line)) (set-position input position))
+(println   "bestmove" (best-move  (mcts position) position))) 
+(recur (str/lower-case (read-line)) (str/join " " (remove #(= "moves" %) input-vector)))
 )
-))
+)))
 
 (defn -main
 []
