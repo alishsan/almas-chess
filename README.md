@@ -4,13 +4,16 @@ A chess engine written in clojure that uses Monte Carlo Tree search.
 
 ## Installation
 
-Download from http://example.com/FIXME.
+Download from https://github.com/alishsan/almas-chess.git.
 
 ## Usage
 
-FIXME: explanation
+From a terminal, cd to the directory of the project, and
 
-    $ java -jar chess-0.1.0-standalone.jar [args]
+1. lein repl
+2. . makeBin.sh
+
+This will create an executable called almas, which can be called from a UCI chess program, i.e. Arena.
 
 ## Options
 
