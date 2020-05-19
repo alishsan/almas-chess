@@ -1,6 +1,6 @@
 # chess
 
-FIXME: description
+A chess engine written in clojure that uses Monte Carlo Tree search.
 
 ## Installation
 
