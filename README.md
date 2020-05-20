@@ -10,8 +10,7 @@ Download from https://github.com/alishsan/almas-chess.git.
 
 From a terminal, cd to the directory of the project, and
 
-1. lein repl
-2. . makeBin.sh
+ . makeBin.sh
 
 This will create an executable called almas, which can be called from a UCI chess program, i.e. Arena.
 
