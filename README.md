@@ -1,6 +1,6 @@
 # chess
 
-A chess engine written in clojure that uses Monte Carlo Tree search.
+A chess engine written in Clojure that uses Monte Carlo Tree search.
 
 ## Installation
 
