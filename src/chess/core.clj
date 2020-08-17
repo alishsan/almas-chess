@@ -1,24 +1,61 @@
+;(set! *warn-on-reflection* true)
+
 (ns chess.core
 
 (require [clojure.set :as set])
 (require [clojure.string :as str])
   (:gen-class))
 
+;(require '[me.raynes.conch :refer [programs with-programs let-programs] :as sh])
+(require '[me.raynes.conch.low-level :as sh])
+(require '[criterium.core :as criterium])
 (use 'chess.basics)
+(use 'chess.trie)
+ (use 'criterium.core)
 
 
-(defn nodes-below
-[tree position]
-(let [cp (count position)]
-(into {}  (filter #(.contains (first %) position) 
-                 (filter #(and (< (count (first %)) (+ cp 7))  (> (count (first %)) cp) ) tree))
+(def stf (sh/proc "stockfish"))
+;(sh/read-line stf :out)
+;(sh/feed-from-string stf "position startpos\n")
+;(sh/feed-from-string stf "validmoves\n")
+;(str/split (sh/read-line stf :out) #" ")
+
+(defn validmoves 
+[board]
+  (let [pos (str/replace (str/join " " board) #"startpos" "position startpos moves" )]
+    (sh/feed-from-string stf (str pos "\n"))
+(sh/feed-from-string stf "validmoves\n")
+(str/split (sh/read-line stf :out) #" ")
+))
+
+(defn validmove 
+[board]
+  (let [pos (str/replace (str/join " " board) #"startpos" "position startpos moves" )]
+    (sh/feed-from-string stf (str pos "\n"))
+(sh/feed-from-string stf "validmove\n")
+(sh/read-line stf :out)
+))
+
+
+
+(defn simulate-stf; calls stockfish to simulate a position
+[position]
+  (let  [pos (str/replace position #"startpos" "position startpos moves" )]
+;(println "sims" pos)
+    (sh/feed-from-string stf (str pos "\n"))
+    (sh/feed-from-string stf "simulate\n")
+    (let [sim (read-string (sh/read-line stf :out))] 
+      (if sim sim (recur position)))))
+
+(defn simulateone
+[node score]
+  (let  [pos (str/join " " node)  ]
+;(println "sims" pos)
+    (let [sim (simulate-stf pos)]
+      [node [(+ (or (first score) 0) sim) (inc (second score))]]
+
 )))
 
-(defn add-to-tree
-"add a position to a tree, used in expansion"
-[tree position]
-   (conj (into {} position) tree)
-)
 
 (defn ratio
 [values]
@@ -29,25 +66,27 @@
 "upper limit"
 [values total]
   (+ (/ (first values) (second values)) (Math/sqrt (/ (* 2 (Math/log total)) 
-                                                      (second values))))
+                     (second values))))
 )
 
 (defn ucb1-
 "lower limit"
 [values total]
-  (- (/ (first values) (second values)) (Math/sqrt (/ (* 2 (Math/log total)) 
+  (- (/ (first values) (second values)) (Math/sqrt (/ (* 2  (Math/log total)) 
                                                       (second values))))
 )
 
+(defn plies [position] 
+  (+ (count (rest position)) (count (str/split (first position) #" ")))
+)
+
+
 (defn best-move
 [tree position]
-  (let [total (second (tree position)) 
-nodes (nodes-below tree position) 
-plies (count (str/split position #" "))
-        pos (first (if (odd? plies) (apply max-key (comp #(ucb1- % total) val) nodes)
- (apply min-key (comp #(ucb1+ % total) val) nodes)) 
-) ]
-(last (str/split pos #" "))
+  (let [total (second (score tree position)) 
+        nodes (filter  #(some? (map first (map (partial score tree) %))) (nodes-below tree position))] 
+    (last (if (odd? (plies position)) (apply max-key (comp #(ucb1- % total)  (partial score tree)) nodes)
+              (apply min-key (comp #(ucb1+ % total)  (partial score tree)) nodes))) 
 ))
 
 
@@ -62,115 +101,115 @@ plies (count (str/split position #" "))
 (last (str/split pos #" "))
 ))
 
+
 (defn select
 [tree topnode]
-(let [total (second(tree topnode))]
-(loop [node topnode] (let [nodes (nodes-below tree node) plies (count (str/split node #" "))]
-(if (or (empty? nodes) (some nil? (first (vals nodes))))
-[tree [node (tree node)]]
-(recur (first (cond (odd? plies) (apply max-key (comp #( ucb1+ % total) val) nodes) 
-:else (apply min-key (comp #(ucb1- % total) val) nodes) 
-)))))
+(let [total (second ( score tree topnode))]
+  (loop [node topnode] (let [nodes (into [node]  
+                                         (nodes-below tree node))  plies (plies node)] ; NB assuming notation is always from the starting position, not fen
+
+(if (or (empty? nodes) (some nil? (map first (map (partial score tree) nodes))))
+  [tree node ]
+(let [selected-node  (if (odd? plies) (apply max-key (comp #( ucb1+ % total)  (partial score tree)) nodes) 
+                           (apply min-key (comp #(ucb1- % total)  (partial score tree)) nodes))]
+
+  (if (=  selected-node node)
+    [tree node]
+(recur selected-node)
+))
+))
 )))
 
 ;(cond (= stm \w) (ucb1 % total))
 
 
-(defn expand
-[tree]
-  (let [node (rand-nth (keys tree)) board  (set-board node)]
 
-  (println node)
-  ;(if (first) (first) (vals tree))
-  (add-to-tree tree
-               (for [move (valid-moves board)] 
-                 {(str node " " (to-algebra  move))  [nil 0]}))
-                                        ;tree ;don't expand if not simulated
+(defn expand
+[tree node]
+  (let [board (first node) newnode  [(str board " " (validmove board))  [nil 0]]]
+    (if  (first (tree (first newnode)))
+[tree node]        ;don't expand 
+      [(add-to-trie tree newnode) newnode])
+    
+                                
       
   ))
 
+
+
 (defn expandall
 "expand to include all-the possible moves"
-[tree node]
+[trie node]
 
-(let [board  (set-board  (first node))]
-(if (first (first (vals tree)))
- (add-to-tree tree
-(for [move (valid-moves board)] 
-   [(str (first node) " " (to-algebra  move))  [nil 0]]))
-tree ;don't expand if not simulated
-)
-))
+  (if (not-empty  (nodes-below trie node)) ; if already expanded
+    [trie node]                       ; just return the input, else
+    (let [board node vm (validmoves board)]
 
-(defn simulate-one
-  [board] ; like ["startpos" [nil 0]]
-(if (first (second board))
-board
+      (if (and  (first (score trie node)) (not-empty (first vm))) ;if the node has been simulated and there are valid moves
+        [(reduce add-to-trie trie
+                 (for [move vm] 
+                   [(conj node  move)  [nil 0]])) node]
+        [trie node])                         ;don't expand if not simulated
+      
+      )))
 
-  (loop [position (set-board (first board)) move-count 1]
-    (let [moves (valid-moves2 position) gresult (game-result position) ] 
-      (if gresult [(first board) [(* gresult 50) 50]]
-          (let [ move (rand-nth moves) nextpos   (move-piece position (first move) (second move)) result (or (game-result nextpos) (if (> move-count 100) 1/2)) ]
-            (if result  
-              [(first  board) [result 1]]  
 
-              (recur nextpos (inc move-count))
-              )))))))
 
 (defn simulate
-  [tree] ; like ["startpos" [nil 0]
-  (let [niltree (filter #(nil? (first (second %))) tree)]
-    (reduce conj tree (map simulate-one niltree)))) 
+  [trie node0] ; node is like ["startpos" "e2e4"]
+
+  (let [node (if (first (score trie node0)) ; if already simulated
+                (or (first (filter #(nil? (first (score trie %))) (nodes-below trie node0))) node0) ; use one of the nodes below to simulate, or the node again if all simulated
+                node0                             ; if not, use node0
+                )]
+
+    (let [newnode (simulateone node (score trie node))]
+;      (println "simul "  newnode)
+      [(add-to-trie trie newnode) (first newnode)]
+))) 
   
 
-(defn update-tree
-"Updates, or backpropagates a tree"
-  [tree0 position0]
-  (let [eval (first (tree0 position0)) nsim (second (tree0 position0))]
-    (loop [tree tree0 position position0]
-      (let [values (tree position) up-position (str/join " " (drop-last (str/split position #" "))) up-values (tree up-position)]
-       
-        (printfv position up-position (+ (first values)  (first up-values) )) ;debug
-        (if (not (first up-values))
-          tree  
-          (recur (conj tree [up-position [(+ eval  (first up-values) ) (+ nsim (second up-values))]] ) up-position)
-          )))))
 
 
-(defn update-tree2
-"Updates, or backpropagates a tree"
-[tree node]
-  (let [nodes (keys (nodes-below tree node))]
+(defn update-trie2
+"Updates, or backpropagates a trie"
+[trie node]
+  (let [nodes (keys (nodes-below trie (first node)))]
 
-    (if (empty? nodes) tree
+    (if (empty? nodes) trie
 
-   ;     (reduce #(add-nodes-below %1  %2) tree nodes)
-     (reduce update-tree tree nodes)
+     (reduce update-trie trie nodes)
 )
 ))
 
 
-(defn add-nodes-below "adds the values of the nodes below to the current node"
-[tree node]
- (let [nodes (conj (keys (nodes-below tree node)) node)]
-    (if (empty? nodes) tree
-(conj tree [node (apply map + (map tree nodes))])
-)))
 
-(defn mcts "Monte Carlo Tree Search"
-[board]
-(loop [tree {board [nil 0]}]
-  (let [positions (keys (filter #(nil? (first (second %))) tree))] ;(first (filter #(not (second %)) tree))
-;(println posval)
-(if (> (count tree) 50)
-  (into {} (filter #(first (second %)) tree))
-(recur (apply expandall
-       (select (reduce update-tree (simulate tree) positions) board)))
-))))  
+
+  
+(defn mcts "Monte Carlo Tree Search using modified stockfish"
+[board] ;board is like "startpos e2e4"
+;(sh/read-line stf :out)
+ 
+;  (let [board (str/replace board0 #"startpos moves" "startpos" )])
+  (let [vm (validmoves [board]) trienode0  (simulate {board {:score [nil 0]}} [board])]
+    (if (= 1 (count vm)) ;if there is only one move, just add it and return the tree, simulating only once
+      (add-to-trie (first trienode0) [[board (first vm)] (score (first trienode0) [board])]) ; 
+
+      (loop [trienode (simulate {board {:score [nil 0]}} [board])] ; trienode -- trie and node
+        (let [total  (second (score (first trienode) [board]))]
+                                        ;(println "total " total)
+          (if (> total 100000)
+            (first trienode)
+            (recur  (apply simulate (apply expandall
+                                           (select (apply update-trie trienode) [board]))))
+            )))))) 
+
 
 (defn uci
 []
 (def nameEngine "almas")
+;(sh/read-line stf :out)
+
 (println "name" nameEngine "\n")
 (loop [input (str/lower-case (read-line)) position "startpos"]
 (when (not= input "quit")
@@ -182,12 +221,13 @@ board
 (println "readyok \n"))
 
 (if (str/includes? input "go")
-(println   "bestmove" (best-move  (mcts position) position))) 
+  (println   "bestmove" (best-move  (mcts position) [position]))) 
 (recur (str/lower-case (read-line)) (str/join " " (remove #(= "moves" %) input-vector)))
 )
 )))
 
 (defn -main
 []
+;(sh/read-line stf :out)
 (uci)
 )

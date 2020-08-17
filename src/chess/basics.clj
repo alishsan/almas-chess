@@ -1,13 +1,16 @@
+;(set! *warn-on-reflection* true)
+
 (ns chess.basics
 
 (require [clojure.set :as set])
 (require [clojure.string :as str])
+
  )
 
 
 (declare game-over)
 ;for debugging
-(def ^:dynamic *verbose* false)
+(def ^:dynamic *verbose* true)
 
 (defmacro printfv
   [fmt & args]
@@ -20,6 +23,25 @@
 ;end debugging code
 
 
+(defmacro loop-it
+[bindings body finish]
+{:pre [(vector? bindings) (even? (count bindings))
+       (vector? (last bindings)) (= :let (last (butlast bindings)))]}
+(let [it-binds (butlast (butlast bindings))
+      sym-binds (take-nth 2 it-binds)
+      colls (take-nth 2 (rest it-binds))
+      iter-syms (repeatedly (count sym-binds) #(gensym "iter"))]
+  `(let ~(vec (mapcat (fn [it coll]
+                        [it `(clojure.lang.RT/iter ~coll)])
+                      iter-syms colls))
+     (loop ~(vec (last bindings))
+       (if (and ~@(map (fn [it] `(.hasNext ~it)) iter-syms))
+         (let ~(vec (mapcat (fn [bind it]
+                              [bind `(.next ~it)])
+                            sym-binds iter-syms))
+           ~body)
+         ~finish)))))
+
 (defn isoff-board 
 "Checks if a square is offboard"
 [n]
@@ -27,7 +49,7 @@
 )
 
 
-(def piece-string "PNBRQKpnbrqk")
+(def ^String piece-string "PNBRQKpnbrqk")
 
 
 (def empty-board
@@ -171,7 +193,7 @@ false)
 false
 (let [ch  (:piece (board pos))]
 (if ch
-  (Character/isLowerCase ch)
+  (Character/isLowerCase ^char ch)
 false)
 )))
 
@@ -302,7 +324,7 @@ board1
 
 (defn set-position
 "sets position for uci"
-[input position]
+[^String input position]
 
 (if (.contains input "startpos")
 (let [board start-board input-vector (str/split input #" ")]
