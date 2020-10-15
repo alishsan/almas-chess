@@ -154,7 +154,19 @@ return 1.0;
 }
 
 //check for mate in ones
-for (const  auto& m :  MoveList<LEGAL>(pos)){
+for (const  auto& m :  MoveList<QUIET_CHECKS>(pos)){
+
+pos.do_move(m,st);
+
+ if ( MoveList<LEGAL>(pos).size() == 0) //mate or stalemate
+{
+std::cout << pos.side_to_move() << std::endl;
+return 1.0;
+}
+pos.undo_move(m);
+}
+
+for (const  auto& m :  MoveList<CAPTURES>(pos)){
 if (pos.gives_check(m)){
 pos.do_move(m,st);
 
@@ -163,7 +175,6 @@ pos.do_move(m,st);
 std::cout << pos.side_to_move() << std::endl;
 return 1.0;
 }
-
 pos.undo_move(m);
 }
 }// end check for mate in ones
