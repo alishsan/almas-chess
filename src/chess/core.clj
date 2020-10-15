@@ -198,7 +198,7 @@ plies (count (str/split position #" "))
       (loop [trienode (simulate {board {:score [nil 0]}} [board])] ; trienode -- trie and node
         (let [total  (second (score (first trienode) [board]))]
                                         ;(println "total " total)
-          (if (> total 100000)
+          (if (> total 40000)
             (first trienode)
             (recur  (apply simulate (apply expandall
                                            (select (apply update-trie trienode) [board]))))
