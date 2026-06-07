@@ -1,11 +1,7 @@
 ;(set! *warn-on-reflection* true)
 
 (ns chess.basics
-
-(require [clojure.set :as set])
-(require [clojure.string :as str])
-
- )
+  (:require [clojure.string :as str]))
 
 
 (declare game-over)
@@ -568,26 +564,25 @@ pos  (first (map :pos (filter #(= (:piece %) (if (= stm "w") \K \k)) board)))]
 
 (defn ismate?
 [board]
-  (and  (ischeck? board) (empty? (valid-moves board)))
-)
+  (and  (ischeck? board) (empty? (valid-moves board))))
 
+(defn isstalemate?
+  [board]
+  (and (not (ischeck? board)) (empty? (valid-moves board))))
 
 (defn game-result
-[board]
-(if (ismate? board)
-  (let [stm (:side-to-move (board 64))]
-(if (= stm "w")
-0; white loses
-1; white wins
-)
-)
-  (if (let [tpv (total-pv board)]
-        (or (= tpv 3) (= tpv 0) (empty? (valid-moves2 board))
-)
-)
-1/2 ;draw
-;??? add stalemate
-)))
+  [board]
+  (cond
+    (ismate? board)
+    (let [stm (:side-to-move (board 64))]
+      (if (= stm "w") 0 1))
+
+    (isstalemate? board) 1/2
+
+    (= (total-pv board) 3) 1/2
+    (= (total-pv board) 0) 1/2
+
+    :else nil))
 
 
 

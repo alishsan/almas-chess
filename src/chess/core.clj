@@ -1,233 +1,183 @@
-;(set! *warn-on-reflection* true)
-
 (ns chess.core
-
-(require [clojure.set :as set])
-(require [clojure.string :as str])
+  (:require [chess.action :as action]
+            [chess.az :as az]
+            [chess.basics :as b]
+            [chess.native :as native]
+            [chess.nn :as nn]
+            [chess.train :as train]
+            [clojure.string :as str])
+  (:import [java.util.concurrent LinkedBlockingQueue TimeUnit])
   (:gen-class))
 
-;(require '[me.raynes.conch :refer [programs with-programs let-programs] :as sh])
-(require '[me.raynes.conch.low-level :as sh])
-(require '[criterium.core :as criterium])
-(use 'chess.basics)
-(use 'chess.trie)
- (use 'criterium.core)
+(def engine-name "almas")
+(def engine-author "Alisher Sanetullaev")
 
+(def stop-search (atom false))
+(def command-queue (LinkedBlockingQueue.))
+(defonce network (atom nil))
 
-(def stf (sh/proc "stockfish"))
-;(sh/read-line stf :out)
-;(sh/feed-from-string stf "position startpos\n")
-;(sh/feed-from-string stf "validmoves\n")
-;(str/split (sh/read-line stf :out) #" ")
+(defn load-network! []
+  (reset! network (nn/load-or-create)))
 
-(defn validmoves 
-[board]
-  (let [pos (str/replace (str/join " " board) #"startpos" "position startpos moves" )]
-    (sh/feed-from-string stf (str pos "\n"))
-(sh/feed-from-string stf "validmoves\n")
-(str/split (sh/read-line stf :out) #" ")
-))
+(defn start-input-reader []
+  (future
+    (loop []
+      (when-let [line (read-line)]
+        (.put command-queue line)
+        (recur)))))
 
-(defn validmove 
-[board]
-  (let [pos (str/replace (str/join " " board) #"startpos" "position startpos moves" )]
-    (sh/feed-from-string stf (str pos "\n"))
-(sh/feed-from-string stf "validmove\n")
-(sh/read-line stf :out)
-))
+(defn drain-commands! []
+  (loop []
+    (when (.poll command-queue 0 TimeUnit/MILLISECONDS)
+      (recur))))
 
+(defn stop-requested? []
+  (when-let [cmd (.peek command-queue)]
+    (when (= "stop" (str/lower-case (str/trim cmd)))
+      (.poll command-queue)
+      (reset! stop-search true)
+      true)))
 
+;; --- Position parsing -------------------------------------------------------
 
-(defn simulate-stf; calls stockfish to simulate a position
-[position]
-  (let  [pos (str/replace position #"startpos" "position startpos moves" )]
-;(println "sims" pos)
-    (sh/feed-from-string stf (str pos "\n"))
-    (sh/feed-from-string stf "simulate\n")
-    (let [sim (read-string (sh/read-line stf :out))] 
-      (if sim sim (recur position)))))
+(defn parse-position-line
+  [input]
+  (let [tokens (str/split (str/trim input) #"\s+")]
+    (when (= (first tokens) "position")
+      (let [toks (rest tokens)]
+        (cond
+          (= (first toks) "startpos")
+          (let [rest (rest toks)
+                moves (if (= (first rest) "moves") (vec (rest rest)) [])]
+            {:kind :startpos :moves moves})
 
-(defn simulateone
-[node score]
-  (let  [pos (str/join " " node)  ]
-;(println "sims" pos)
-    (let [sim (simulate-stf pos)]
-      [node [(+ (or (first score) 0) sim) (inc (second score))]]
+          (= (first toks) "fen")
+          (let [fen-parts (take 6 (rest toks))
+                after (drop 6 (rest toks))
+                moves (if (= (first after) "moves") (vec (rest after)) [])]
+            {:kind :fen :fen (str/join " " fen-parts) :moves moves})
 
-)))
+          :else nil)))))
 
+(defn position-state->board
+  [{:keys [kind fen moves]}]
+  (let [base (case kind
+               :startpos b/start-board
+               :fen (b/fen-to-board fen))]
+    (reduce b/make-move base moves)))
 
-(defn ratio
-[values]
- (/ (first values) (second values))
-)
+(defn side-to-move
+  [position-state]
+  (let [white-to-move? (case (:kind position-state)
+                         :startpos (even? (count (:moves position-state)))
+                         :fen (let [stm (second (str/split (:fen position-state) #" "))]
+                                (if (= stm "w")
+                                  (even? (count (:moves position-state)))
+                                  (odd? (count (:moves position-state))))))]
+    (if white-to-move? :white :black)))
 
-(defn ucb1+ 
-"upper limit"
-[values total]
-  (+ (/ (first values) (second values)) (Math/sqrt (/ (* 2 (Math/log total)) 
-                     (second values))))
-)
+;; --- Search -----------------------------------------------------------------
 
-(defn ucb1-
-"lower limit"
-[values total]
-  (- (/ (first values) (second values)) (Math/sqrt (/ (* 2  (Math/log total)) 
-                                                      (second values))))
-)
+(def default-search-ms 5000)
+(def default-mcts-sims 400)
 
-(defn plies [position] 
-  (+ (count (rest position)) (count (str/split (first position) #" ")))
-)
+(defn parse-go
+  [input]
+  (let [tokens (str/split (str/trim input) #"\s+")]
+    (loop [opts {} toks (rest tokens)]
+      (if (empty? toks)
+        opts
+        (let [tok (first toks)]
+          (cond
+            (= tok "wtime") (recur (assoc opts :wtime (Long/parseLong (second toks))) (drop 2 toks))
+            (= tok "btime") (recur (assoc opts :btime (Long/parseLong (second toks))) (drop 2 toks))
+            (= tok "winc") (recur (assoc opts :winc (Long/parseLong (second toks))) (drop 2 toks))
+            (= tok "binc") (recur (assoc opts :binc (Long/parseLong (second toks))) (drop 2 toks))
+            (= tok "movestogo") (recur (assoc opts :movestogo (Long/parseLong (second toks))) (drop 2 toks))
+            (= tok "movetime") (recur (assoc opts :movetime (Long/parseLong (second toks))) (drop 2 toks))
+            (= tok "depth") (recur (assoc opts :depth (Long/parseLong (second toks))) (drop 2 toks))
+            (= tok "nodes") (recur (assoc opts :nodes (Long/parseLong (second toks))) (drop 2 toks))
+            (= tok "infinite") (recur (assoc opts :infinite true) (rest toks))
+            :else (recur opts (rest toks))))))))
 
+(defn compute-time-ms
+  [go-opts position-state]
+  (cond
+    (:movetime go-opts) (:movetime go-opts)
+    (:infinite go-opts) Long/MAX_VALUE
+    (and (:wtime go-opts) (:btime go-opts))
+    (let [stm (side-to-move position-state)
+          time (if (= stm :white) (:wtime go-opts) (:btime go-opts))
+          inc-ms (if (= stm :white) (or (:winc go-opts) 0) (or (:binc go-opts) 0))
+          mtg (max 1 (or (:movestogo go-opts) 30))]
+      (max 100 (int (+ inc-ms (/ time mtg)))))
+    :else default-search-ms))
 
-(defn best-move
-[tree position]
-  (let [total (second (score tree position)) 
-        nodes (filter  #(some? (map first (map (partial score tree) %))) (nodes-below tree position))] 
-    (last (if (odd? (plies position)) (apply max-key (comp #(ucb1- % total)  (partial score tree)) nodes)
-              (apply min-key (comp #(ucb1+ % total)  (partial score tree)) nodes))) 
-))
+(defn run-search
+  [position-state go-opts]
+  (reset! stop-search false)
+  (drain-commands!)
+  (let [board (position-state->board position-state)
+        budget-ms (compute-time-ms go-opts position-state)
+        deadline (+ (System/currentTimeMillis) budget-ms)
+        net @network
+        move (az/best-uci-move board net {:deadline deadline
+                                          :stop? #(deref stop-search)
+                                          :simulations default-mcts-sims})]
+    (println (str "bestmove " (or move "(none)")))))
 
+;; --- UCI loop ---------------------------------------------------------------
 
-(defn ordered-moves
-[tree position]
-  (let [total (second (tree position)) 
-nodes (nodes-below tree position) 
-plies (count (str/split position #" "))
-        pos (first (if (odd? plies) (apply sort-by (comp #(ucb1- % total) val) nodes)
- (apply sort-by (comp #(ucb1+ % total) val) nodes)) 
-) ]
-(last (str/split pos #" "))
-))
+(defn handle-uci-command
+  [input position-state]
+  (let [line (str/trim input)
+        lower (str/lower-case line)]
+    (cond
+      (= lower "uci")
+      (do
+        (println (str "id name " engine-name))
+        (println (str "id author " engine-author))
+        (println "uciok")
+        position-state)
 
+      (= lower "isready")
+      (do
+        (println "readyok")
+        position-state)
 
-(defn select
-[tree topnode]
-(let [total (second ( score tree topnode))]
-  (loop [node topnode] (let [nodes (into [node]  
-                                         (nodes-below tree node))  plies (plies node)] ; NB assuming notation is always from the starting position, not fen
+      (= lower "ucinewgame")
+      {:kind :startpos :moves []}
 
-(if (or (empty? nodes) (some nil? (map first (map (partial score tree) nodes))))
-  [tree node ]
-(let [selected-node  (if (odd? plies) (apply max-key (comp #( ucb1+ % total)  (partial score tree)) nodes) 
-                           (apply min-key (comp #(ucb1- % total)  (partial score tree)) nodes))]
+      (str/starts-with? lower "position ")
+      (or (parse-position-line line) position-state)
 
-  (if (=  selected-node node)
-    [tree node]
-(recur selected-node)
-))
-))
-)))
+      (str/starts-with? lower "go")
+      (do
+        (run-search position-state (parse-go line))
+        position-state)
 
-;(cond (= stm \w) (ucb1 % total))
+      (= lower "stop")
+      (do (reset! stop-search true) position-state)
 
+      (= lower "quit")
+      (do (reset! stop-search true) ::quit)
 
-
-(defn expand
-[tree node]
-  (let [board (first node) newnode  [(str board " " (validmove board))  [nil 0]]]
-    (if  (first (tree (first newnode)))
-[tree node]        ;don't expand 
-      [(add-to-trie tree newnode) newnode])
-    
-                                
-      
-  ))
-
-
-
-(defn expandall
-"expand to include all-the possible moves"
-[trie node]
-
-  (if (not-empty  (nodes-below trie node)) ; if already expanded
-    [trie node]                       ; just return the input, else
-    (let [board node vm (validmoves board)]
-
-      (if (and  (first (score trie node)) (not-empty (first vm))) ;if the node has been simulated and there are valid moves
-        [(reduce add-to-trie trie
-                 (for [move vm] 
-                   [(conj node  move)  [nil 0]])) node]
-        [trie node])                         ;don't expand if not simulated
-      
-      )))
-
-
-
-(defn simulate
-  [trie node0] ; node is like ["startpos" "e2e4"]
-
-  (let [node (if (first (score trie node0)) ; if already simulated
-                (or (first (filter #(nil? (first (score trie %))) (nodes-below trie node0))) node0) ; use one of the nodes below to simulate, or the node again if all simulated
-                node0                             ; if not, use node0
-                )]
-
-    (let [newnode (simulateone node (score trie node))]
-;      (println "simul "  newnode)
-      [(add-to-trie trie newnode) (first newnode)]
-))) 
-  
-
-
-
-(defn update-trie2
-"Updates, or backpropagates a trie"
-[trie node]
-  (let [nodes (keys (nodes-below trie (first node)))]
-
-    (if (empty? nodes) trie
-
-     (reduce update-trie trie nodes)
-)
-))
-
-
-
-
-  
-(defn mcts "Monte Carlo Tree Search using modified stockfish"
-[board] ;board is like "startpos e2e4"
-;(sh/read-line stf :out)
- 
-;  (let [board (str/replace board0 #"startpos moves" "startpos" )])
-  (let [vm (validmoves [board]) trienode0  (simulate {board {:score [nil 0]}} [board])]
-    (if (= 1 (count vm)) ;if there is only one move, just add it and return the tree, simulating only once
-      (add-to-trie (first trienode0) [[board (first vm)] (score (first trienode0) [board])]) ; 
-
-      (loop [trienode (simulate {board {:score [nil 0]}} [board])] ; trienode -- trie and node
-        (let [total  (second (score (first trienode) [board]))]
-                                        ;(println "total " total)
-          (if (> total 40000)
-            (first trienode)
-            (recur  (apply simulate (apply expandall
-                                           (select (apply update-trie trienode) [board]))))
-            )))))) 
-
+      :else position-state)))
 
 (defn uci
-[]
-(def nameEngine "almas")
-;(sh/read-line stf :out)
-
-(println "name" nameEngine "\n")
-(loop [input (str/lower-case (read-line)) position "startpos"]
-(when (not= input "quit")
-(let [input-vector (rest (str/split input #" "))] ;remove the word "position"
-(if (= "uci" input)
-(println "id" nameEngine " \n uciok \n"))
-
-(if (= "isready" input)
-(println "readyok \n"))
-
-(if (str/includes? input "go")
-  (println   "bestmove" (best-move  (mcts position) [position]))) 
-(recur (str/lower-case (read-line)) (str/join " " (remove #(= "moves" %) input-vector)))
-)
-)))
+  []
+  (start-input-reader)
+  (loop [position-state {:kind :startpos :moves []}]
+    (let [input (.take command-queue)
+          next-state (handle-uci-command input position-state)]
+      (when-not (= ::quit next-state)
+        (recur next-state)))))
 
 (defn -main
-[]
-;(sh/read-line stf :out)
-(uci)
-)
+  [& args]
+  (case (first args)
+    "train" (apply train/-main (rest args))
+    (do
+      (native/print-backend-status!)
+      (load-network!)
+      (uci))))

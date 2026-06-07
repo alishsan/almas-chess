@@ -1,0 +1,25 @@
+--- a/src/uci.cpp
++++ b/src/uci.cpp
+@@ -90,6 +90,14 @@ namespace {
+     sync_cout << "\n" << Eval::trace(p) << sync_endl;
+   }
+ 
++  // validmoves() outputs legal moves in UCI format (almas-chess native backend).
++  void validmoves(Position& pos) {
++    std::ostringstream ss;
++    for (const auto& m : MoveList<LEGAL>(pos))
++      ss << UCI::move(m, pos.is_chess960()) << " ";
++    sync_cout << ss.str() << sync_endl;
++  }
++
+ 
+   // setoption() is called when engine receives the "setoption" UCI command. The
+   // function updates the UCI option ("name") to the given value ("value").
+@@ -267,6 +275,7 @@
+       else if (token == "position")   position(pos, is, states);
+       else if (token == "ucinewgame") Search::clear();
+       else if (token == "isready")    sync_cout << "readyok" << sync_endl;
++      else if (token == "validmoves") validmoves(pos);
+ 
+       // Additional custom non-UCI commands, mainly for debugging.
+       // Do not use these commands during a search!

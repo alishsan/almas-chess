@@ -1,7 +1,6 @@
 
 (ns chess.trie
-(require [clojure.string :as str])
- )
+  (:require [clojure.string :as str]))
 
 (defn add-to-trie [trie [move score]]
   (assoc-in trie move (merge (get-in trie move) {:score score})))
